@@ -4,7 +4,7 @@ MASIC compiles a small, typed subset of Python into a WebAssembly module. The
 decorated function body is **read as source; it is not executed by Python**.
 
 ```python
-from masic import WebAssembly, i32
+from masic import *
 
 with WebAssembly("math") as wasm:
     @wasm.func(export=True)       # exported as "add"
@@ -20,10 +20,7 @@ building outside a context manager.
 ## Imports and numeric types
 
 ```python
-from masic import (
-    WebAssembly,
-    i8, u8, i16, u16, i32, u32, i64, u64, f32, f64,
-)
+from masic import *
 
 with WebAssembly("numbers") as wasm:
     @wasm.func(export=True)
@@ -90,7 +87,7 @@ Python `if`, `while`, `for`, `break`, and `continue` are not compiled. Use
 explicit scopes, which make the generated control flow obvious.
 
 ```python
-from masic import branch, loop
+from masic import *
 
 @wasm.func(export=True)
 def sum_except_five(limit: i32) -> i32:
@@ -115,7 +112,7 @@ def sum_except_five(limit: i32) -> i32:
 breakable scope.
 
 ```python
-from masic import block, branch
+from masic import *
 
 @wasm.func(export=True)
 def choose(value: i32) -> i32:
@@ -143,7 +140,7 @@ Memory is automatic and is exported as `memory` only when a feature needs it.
 `malloc()` adds MASIC's allocator; `mfree()` releases an allocation.
 
 ```python
-from masic import malloc, mfree, pointer, sizeof, i32, u8, u32
+from masic import *
 
 @wasm.func(export=True)
 def make_pair(left: i32, right: i32) -> u32:
@@ -215,7 +212,7 @@ Declare imports before every local `@wasm.func`. An imported declaration has
 only `...` or `pass` for its body; the host provides the implementation.
 
 ```python
-from masic import WebAssembly, i32, pointer, u32
+from masic import *
 
 with WebAssembly("interop") as wasm:
     @wasm.import_func("host", name="log_i32")  # import module + field
@@ -240,7 +237,7 @@ the engine and exchanges `u32` addresses with exported functions.
 ## Persistent state, indirect calls, and start
 
 ```python
-from masic import WebAssembly, i32
+from masic import *
 
 with WebAssembly("state", debug=True) as wasm:   # includes Wasm name metadata
     counter = wasm.create_global(i32, 0, mutable=True, export="counter")
