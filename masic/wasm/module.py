@@ -25,7 +25,7 @@ class WebAssembly:
 
     MAGIC_AND_VERSION = b"\x00asm\x01\x00\x00\x00"
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str = "module") -> None:
         if not isinstance(name, str) or not name:
             raise ValueError("module name must be a non-empty string")
         self.name = name
@@ -93,6 +93,11 @@ class WebAssembly:
     def data(self) -> bytes:
         return self.bytecode
 
+    @property
+    def bytes(self) -> bytes:
+        """The compiled WebAssembly binary."""
+        return self.bytecode
+
     def _install_internal_dependency(
         self,
         name: str,
@@ -126,6 +131,11 @@ class WebAssembly:
         self._bytecode = _ModuleEncoder(self).encode()
         self._closed = True
         return self._bytecode
+
+    def compile(self) -> WebAssembly:
+        """Assemble this module, returning it as the compiled artifact."""
+        self._assemble()
+        return self
 
     def save(self, filepath: str | Path) -> Path:
         if self._bytecode is None:

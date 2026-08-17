@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar, get_type_hints
 
 from .errors import CompileError
 from .instructions import Instruction, WasmInstructions
+from .source import SourceFunctionCompiler
 from .types import coerce_value, expr, is_numeric_type
 
 if TYPE_CHECKING:
@@ -106,6 +107,19 @@ class FunctionBuilder:
         self.emit(*value.instructions, self.set(local))
         return type(value).local(local.index, module=self.module)
 
+    def materialized_local(self, value: expr) -> LocalRef | None:
+        """Return the local represented by a materialized expression, if any."""
+        if len(value.instructions) != 1:
+            return None
+        instruction = value.instructions[0]
+        if instruction.name != "local.get" or not isinstance(instruction.argument, int):
+            return None
+        index = instruction.argument
+        local_index = index - len(self.parameter_types)
+        if not 0 <= local_index < len(self.local_types):
+            return None
+        return LocalRef(index, self.local_types[local_index])
+
     def finish(self, result: expr | None = None) -> FunctionBody:
         instructions = tuple(self.statements)
         if result is not None:
@@ -167,7 +181,6 @@ class FunctionCompiler:
         parameter_names: list[str] = []
         parameter_types: list[type[expr]] = []
         defaults: list[tuple[str, Any]] = []
-        arguments: list[expr] = []
 
         for index, (parameter_name, parameter) in enumerate(python_signature.parameters.items()):
             if parameter.kind not in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
@@ -176,7 +189,6 @@ class FunctionCompiler:
             self._validate_type(annotation, f"parameter {parameter_name!r} of {function.__name__}()")
             parameter_names.append(parameter_name)
             parameter_types.append(annotation)
-            arguments.append(annotation.local(index, module=self.module))
             if parameter.default is not inspect.Parameter.empty:
                 annotation.constant(parameter.default)
                 defaults.append((parameter_name, parameter.default))
@@ -187,22 +199,11 @@ class FunctionCompiler:
 
         try:
             with FunctionBuilder(self.module, tuple(parameter_types)) as builder:
-                returned = function(*arguments)
+                result = SourceFunctionCompiler(function, builder, signature, self.module).compile()
         except CompileError:
             raise
         except Exception as error:
             raise CompileError(f"failed while building {function.__name__}(): {error}") from error
-
-        if not isinstance(returned, expr) and (
-            not isinstance(returned, (int, float)) or isinstance(returned, bool)
-        ):
-            raise CompileError(
-                f"{function.__name__}() must return a Wasm expression or numeric literal, "
-                f"got {type(returned).__name__}"
-            )
-        result = coerce_value(returned, return_type)
-        if result._module is not None and result._module is not self.module:
-            raise CompileError(f"{function.__name__}() returned an expression from another module")
 
         declaration = FunctionDeclaration(
             index=self.module._next_function_index(),

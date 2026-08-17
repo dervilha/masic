@@ -1,4 +1,5 @@
 from .errors import CompileError, ExpressionError, ModuleStateError
+from .control import block, branch, loop
 from .functions import func
 from .module import WebAssembly
 from .memory import malloc, mfree, pointer, sizeof
@@ -9,6 +10,9 @@ __all__ = [
     "CompileError",
     "ExpressionError",
     "ModuleStateError",
+    "block",
+    "branch",
+    "loop",
     "WebAssembly",
     "expr",
     "func",

@@ -51,11 +51,21 @@ class expr:
 
     def __init__(
         self,
-        instructions: tuple[Instruction, ...] = (),
+        instructions: tuple[Instruction, ...] | int | float = (),
         *,
         module: WebAssembly | None = None,
         trace: tuple[str, ...] = (),
     ) -> None:
+        if isinstance(instructions, (int, float)) and not isinstance(instructions, bool):
+            if module is not None or trace:
+                raise ExpressionError("numeric literal expressions cannot have module state")
+            literal = type(self).constant(instructions)
+            self._instructions = literal._instructions
+            self._module = literal._module
+            self._trace = literal._trace
+            return
+        if not isinstance(instructions, tuple):
+            raise ExpressionError("expression instructions must be a tuple or numeric literal")
         self._instructions = tuple(instructions)
         self._module = module
         self._trace = tuple(trace)
