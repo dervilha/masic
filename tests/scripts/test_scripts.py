@@ -11,7 +11,11 @@ from pathlib import Path
 SCRIPTS = {
     "wasm_examples.py": ((), "compiled"),
     "numeric_runtime.py": ((), "compiled"),
+    "stdlib_runtime.py": ((), "compiled"),
     "allocator_runtime.py": ((), "compiled"),
+    "array_runtime.py": ((), "compiled"),
+    "interop_runtime.py": ((), "shared memory"),
+    "sections_runtime.py": ((), "sections module"),
     "benchmark.py": (("--calls", "1", "--samples", "1", "--limit", "10"), "Wasm batched execution"),
     "limitations.py": ((), "expected compiler rejection"),
 }

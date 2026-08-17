@@ -53,13 +53,17 @@ class SourceFunctionCompiler:
         for index, name in enumerate(signature.parameter_names):
             self.bindings[name] = _ExpressionBinding(builder.parameter(index, name))
 
-    def compile(self) -> expr:
+    def compile(self) -> expr | None:
         definition = self._definition()
         if not definition.body or not isinstance(definition.body[-1], ast.Return):
             raise self._error(definition, "compiled functions must end with a Python return statement")
         self._compile_statements(definition.body[:-1])
         final_return = definition.body[-1]
         assert isinstance(final_return, ast.Return)
+        if self.signature.return_type is None:
+            if final_return.value is not None:
+                raise self._error(final_return, "void functions must use a bare Python return statement")
+            return None
         if final_return.value is None:
             raise self._error(final_return, "compiled functions must return a value")
         return self._coerce_return(self._expression(final_return.value), final_return)
@@ -117,10 +121,20 @@ class SourceFunctionCompiler:
             value = self._expression(statement.value)
             if isinstance(value, expr):
                 self.builder.emit(*value.instructions, WasmInstructions.create("drop"))
+            else:
+                from .functions import CallEffect
+
+                if isinstance(value, CallEffect):
+                    self.builder.emit(*value.instructions)
             return
         if isinstance(statement, ast.Return):
             if statement.value is None:
-                raise self._error(statement, "compiled functions must return a value")
+                if self.signature.return_type is not None:
+                    raise self._error(statement, "compiled functions must return a value")
+                self.builder.emit(WasmInstructions.create("return"))
+                return
+            if self.signature.return_type is None:
+                raise self._error(statement, "void functions must use a bare Python return statement")
             result = self._coerce_return(self._expression(statement.value), statement)
             self.builder.emit(*result.instructions, WasmInstructions.create("return"))
             return
@@ -141,6 +155,10 @@ class SourceFunctionCompiler:
         raise self._error(statement, f"unsupported statement {type(statement).__name__}")
 
     def _assign(self, target: ast.expr, value: object, node: ast.AST) -> None:
+        from .functions import CallEffect
+
+        if isinstance(value, CallEffect):
+            raise self._error(node, "void calls may only be used as standalone statements")
         if isinstance(target, ast.Name):
             existing = self.bindings.get(target.id)
             if isinstance(existing, _ControlBinding):
@@ -175,12 +193,17 @@ class SourceFunctionCompiler:
         raise self._error(node, "assignment target is not supported")
 
     def _augmented_assign(self, statement: ast.AugAssign) -> None:
-        if not isinstance(statement.target, ast.Name):
-            raise self._error(statement, "augmented assignment requires a local name")
-        binding = self.bindings.get(statement.target.id)
-        if not isinstance(binding, _ExpressionBinding):
-            raise self._error(statement, f"{statement.target.id!r} is not a numeric local")
-        left = self._read_binding(binding)
+        if isinstance(statement.target, ast.Name):
+            binding = self.bindings.get(statement.target.id)
+            if not isinstance(binding, _ExpressionBinding):
+                raise self._error(statement, f"{statement.target.id!r} is not a numeric local")
+            left = self._read_binding(binding)
+            assign = lambda value: self.builder.emit(*value.instructions, self.builder.set(binding.local))
+        elif isinstance(statement.target, (ast.Attribute, ast.Subscript)):
+            left = self._expression(statement.target)
+            assign = lambda value: self._store(statement.target, value, statement)
+        else:
+            raise self._error(statement, "unsupported augmented assignment target")
         right = self._expression(statement.value)
         operation = {
             ast.Add: lambda: left + right,
@@ -198,7 +221,9 @@ class SourceFunctionCompiler:
         if operation is None:
             raise self._error(statement, f"unsupported augmented assignment {type(statement.op).__name__}")
         value = operation()
-        self.builder.emit(*value.instructions, self.builder.set(binding.local))
+        if not isinstance(value, expr):
+            raise self._error(statement, "augmented assignment requires a numeric value")
+        assign(value)
 
     def _store(self, target: ast.Attribute | ast.Subscript, value: object, node: ast.AST) -> None:
         try:
@@ -292,8 +317,10 @@ class SourceFunctionCompiler:
 
     def _expression(self, node: ast.AST) -> object:
         if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                return node.value
             if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
-                raise self._error(node, "only numeric literals are supported")
+                raise self._error(node, "only numeric and string literals are supported")
             return node.value
         if isinstance(node, ast.Name):
             binding = self.bindings.get(node.id)

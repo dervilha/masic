@@ -18,6 +18,9 @@ class InstructionRegistryTests(unittest.TestCase):
         self.assertEqual(WasmInstructions.create("block").encode(), b"\x02\x40")
         self.assertEqual(WasmInstructions.create("memory.grow").encode(), b"\x40\x00")
 
+    def test_indirect_calls_encode_type_and_table_indices(self):
+        self.assertEqual(WasmInstructions.create("call_indirect", (3, 0)).encode(), b"\x11\x03\x00")
+
     def test_invalid_names_and_immediates_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "unsupported"):
             WasmInstructions.create("i32.not_real")

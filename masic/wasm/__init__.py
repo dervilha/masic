@@ -3,6 +3,7 @@ from .control import block, branch, loop
 from .functions import func
 from .module import WebAssembly
 from .memory import malloc, mfree, pointer, sizeof
+from .stdlib import stdlib
 from .instructions import Instruction, InstructionSpec, WasmInstructions
 from .types import expr, f32, f64, i8, i16, i32, i64, u8, u16, u32, u64
 
@@ -14,6 +15,7 @@ __all__ = [
     "branch",
     "loop",
     "WebAssembly",
+    "stdlib",
     "expr",
     "func",
     "i8",

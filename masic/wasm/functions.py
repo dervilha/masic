@@ -20,6 +20,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 class FunctionBody:
     instructions: tuple[Instruction, ...]
     local_types: tuple[type[expr], ...] = ()
+    local_names: tuple[str | None, ...] = ()
 
     def encode(self) -> bytes:
         return b"".join(instruction.encode() for instruction in self.instructions)
@@ -42,6 +43,7 @@ class FunctionBuilder:
         self.module = module
         self.parameter_types = parameter_types
         self.local_types: list[type[expr]] = []
+        self.local_names: list[str | None] = []
         self.statements: list[Instruction] = []
         self._token: Token[FunctionBuilder | None] | None = None
 
@@ -70,6 +72,7 @@ class FunctionBuilder:
             raise CompileError("local type must be a concrete Wasm numeric type")
         reference = LocalRef(len(self.parameter_types) + len(self.local_types), value_type, name)
         self.local_types.append(value_type)
+        self.local_names.append(name)
         return reference
 
     def emit(self, *instructions: Instruction) -> None:
@@ -124,7 +127,7 @@ class FunctionBuilder:
         instructions = tuple(self.statements)
         if result is not None:
             instructions += result.instructions
-        return FunctionBody(instructions, tuple(self.local_types))
+        return FunctionBody(instructions, tuple(self.local_types), tuple(self.local_names))
 
 
 def active_function(*, module: WebAssembly | None = None) -> FunctionBuilder:
@@ -162,6 +165,25 @@ class FunctionDeclaration:
     export: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ImportDeclaration:
+    """One Wasm function supplied by the embedding host."""
+
+    index: int
+    name: str
+    module_name: str
+    field_name: str
+    signature: FunctionSignature
+
+
+@dataclass(frozen=True, slots=True)
+class CallEffect:
+    """A statement-only call to a function with no result."""
+
+    instructions: tuple[Instruction, ...]
+    trace: tuple[str, ...]
+
+
 class FunctionCompiler:
     """Compiles one decorated Python callable into a registered function."""
 
@@ -172,33 +194,10 @@ class FunctionCompiler:
         if self.module._has_function(function.__name__):
             raise CompileError(f"function {function.__name__!r} is already registered")
 
-        python_signature = inspect.signature(function)
-        try:
-            annotations = get_type_hints(function)
-        except Exception as error:
-            raise CompileError(f"could not resolve annotations for {function.__name__}(): {error}") from error
-
-        parameter_names: list[str] = []
-        parameter_types: list[type[expr]] = []
-        defaults: list[tuple[str, Any]] = []
-
-        for index, (parameter_name, parameter) in enumerate(python_signature.parameters.items()):
-            if parameter.kind not in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
-                raise CompileError(f"{function.__name__}(): variadic and keyword-only parameters are not supported")
-            annotation = annotations.get(parameter_name)
-            self._validate_type(annotation, f"parameter {parameter_name!r} of {function.__name__}()")
-            parameter_names.append(parameter_name)
-            parameter_types.append(annotation)
-            if parameter.default is not inspect.Parameter.empty:
-                annotation.constant(parameter.default)
-                defaults.append((parameter_name, parameter.default))
-
-        return_type = annotations.get("return")
-        self._validate_type(return_type, f"return value of {function.__name__}()")
-        signature = FunctionSignature(tuple(parameter_names), tuple(parameter_types), return_type, tuple(defaults))
+        signature = self._signature(function)
 
         try:
-            with FunctionBuilder(self.module, tuple(parameter_types)) as builder:
+            with FunctionBuilder(self.module, signature.parameter_types) as builder:
                 result = SourceFunctionCompiler(function, builder, signature, self.module).compile()
         except CompileError:
             raise
@@ -215,8 +214,71 @@ class FunctionCompiler:
         self.module._register_function(declaration)
         return func(self.module, declaration, function)
 
+    def compile_import(self, function: F, *, module_name: str, field_name: str | None) -> func:
+        if self.module._has_function(function.__name__):
+            raise CompileError(f"function {function.__name__!r} is already registered")
+        self._validate_import_body(function)
+        signature = self._signature(function)
+        declaration = ImportDeclaration(
+            index=self.module._next_import_index(),
+            name=function.__name__,
+            module_name=module_name,
+            field_name=field_name or function.__name__,
+            signature=signature,
+        )
+        self.module._register_import(declaration)
+        return func(self.module, declaration, function)
+
+    def _signature(self, function: F) -> FunctionSignature:
+        python_signature = inspect.signature(function)
+        try:
+            annotations = get_type_hints(function)
+        except Exception as error:
+            raise CompileError(f"could not resolve annotations for {function.__name__}(): {error}") from error
+
+        parameter_names: list[str] = []
+        parameter_types: list[type[expr]] = []
+        defaults: list[tuple[str, Any]] = []
+        for parameter_name, parameter in python_signature.parameters.items():
+            if parameter.kind not in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
+                raise CompileError(f"{function.__name__}(): variadic and keyword-only parameters are not supported")
+            annotation = annotations.get(parameter_name)
+            self._validate_type(annotation, f"parameter {parameter_name!r} of {function.__name__}()")
+            parameter_names.append(parameter_name)
+            parameter_types.append(annotation)
+            if parameter.default is not inspect.Parameter.empty:
+                annotation.constant(parameter.default)
+                defaults.append((parameter_name, parameter.default))
+
+        return_type = annotations.get("return")
+        if return_type is type(None):
+            return_type = None
+        self._validate_type(return_type, f"return value of {function.__name__}()", allow_void=True)
+        return FunctionSignature(tuple(parameter_names), tuple(parameter_types), return_type, tuple(defaults))
+
     @staticmethod
-    def _validate_type(annotation: object, location: str) -> None:
+    def _validate_import_body(function: F) -> None:
+        try:
+            source = inspect.getsource(function)
+        except (OSError, TypeError) as error:
+            raise CompileError(f"could not read source for imported {function.__name__}()") from error
+        tree = inspect.cleandoc(source)
+        import ast
+        definition = ast.parse(tree).body[0]
+        if not isinstance(definition, ast.FunctionDef):
+            raise CompileError(f"could not locate imported function {function.__name__}()")
+        body = definition.body
+        valid = len(body) == 1 and (
+            isinstance(body[0], ast.Pass)
+            or (isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and body[0].value.value is Ellipsis)
+        )
+        if not valid:
+            raise CompileError("@wasm.import_func declarations must have exactly `pass` or `...` as their body")
+
+    @staticmethod
+    def _validate_type(annotation: object, location: str, *, allow_void: bool = False) -> None:
+        if annotation in (None, type(None)) and allow_void:
+            return
         if not is_numeric_type(annotation):
             raise CompileError(f"{location} must have a concrete Wasm numeric type annotation")
 
@@ -226,7 +288,7 @@ class func:
 
     __slots__ = ("_module", "_declaration", "__name__", "__qualname__")
 
-    def __init__(self, module: WebAssembly, declaration: FunctionDeclaration, original: Any) -> None:
+    def __init__(self, module: WebAssembly, declaration: FunctionDeclaration | ImportDeclaration, original: Any) -> None:
         self._module = module
         self._declaration = declaration
         self.__name__ = declaration.name
@@ -240,9 +302,7 @@ class func:
     def signature(self) -> FunctionSignature:
         return self._declaration.signature
 
-    def __call__(self, *args: object, **kwargs: object) -> expr:
-        if self.signature.return_type is None:
-            raise CompileError(f"void function {self.__name__}() cannot be used as an expression")
+    def __call__(self, *args: object, **kwargs: object) -> expr | CallEffect:
         parameters = [
             inspect.Parameter(
                 name,
@@ -269,6 +329,8 @@ class func:
             trace += argument.debug_trace
 
         instruction = WasmInstructions.create("call", self.index)
+        if self.signature.return_type is None:
+            return CallEffect(instructions + (instruction,), trace + (f"call {self.__name__}",))
         return self.signature.return_type(
             instructions + (instruction,),
             module=self._module,

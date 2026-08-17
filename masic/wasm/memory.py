@@ -57,6 +57,30 @@ class PointerType:
     def __repr__(self) -> str:
         return f"pointer[{self.dtype.__name__}]"
 
+    def from_address(self, address: object) -> pointer:
+        """Create a typed view of a raw wasm32 linear-memory address.
+
+        The address is intentionally unchecked: it may refer to host-owned
+        bytes, static data, or allocator storage.  Callers own bounds and
+        lifetime discipline.
+        """
+        builder = active_function()
+        module = builder.module
+        if isinstance(address, int) and not isinstance(address, bool):
+            if not 0 <= address <= 0xFFFFFFFF:
+                raise ExpressionError("pointer address is outside the wasm32 address range")
+            value = u32.constant(address)
+        elif isinstance(address, expr):
+            if address.category != "int":
+                raise ExpressionError("pointer address must be an integer Wasm expression")
+            if address._module is not None and address._module is not module:
+                raise ExpressionError("pointer address belongs to another WebAssembly module")
+            value = address.cast(u32)
+        else:
+            raise ExpressionError("pointer address must be an integer or Wasm integer expression")
+        module._ensure_memory(export=True)
+        return pointer(module, self.dtype, value)
+
 
 @lru_cache(maxsize=None)
 def _pointer_type(dtype: type[expr]) -> PointerType:
@@ -254,31 +278,33 @@ class _AllocatorCompiler:
         return self.builder.instruction("br_if" if conditional else "br", depth)
 
 
-def allocator_declarations(start_index: int) -> tuple[FunctionDeclaration, FunctionDeclaration]:
+def allocator_declarations(
+    start_index: int, layout: AllocatorLayout = ALLOCATOR_LAYOUT, *, global_index: int = 0
+) -> tuple[FunctionDeclaration, FunctionDeclaration]:
     malloc_signature = FunctionSignature(("size",), (u32,), u32)
     free_signature = FunctionSignature(("address",), (u32,), None)
     return (
-        FunctionDeclaration(start_index, "$malloc", malloc_signature, _malloc_body(), False),
-        FunctionDeclaration(start_index + 1, "$mfree", free_signature, _free_body(), False),
+        FunctionDeclaration(start_index, "$malloc", malloc_signature, _malloc_body(layout, global_index), False),
+        FunctionDeclaration(start_index + 1, "$mfree", free_signature, _free_body(layout, global_index), False),
     )
 
 
 def ensure_allocator(module: WebAssembly) -> tuple[int, int]:
     from .module import MemoryRequirement
 
+    global_index = module._ensure_allocator_global()
     return module._install_internal_dependency(
         "allocator",
-        allocator_declarations,
+        lambda start_index: allocator_declarations(start_index, global_index=global_index),
         memory=MemoryRequirement(
             initial_pages=1,
-            mutable_i32_globals=(ALLOCATOR_LAYOUT.heap_start,),
             export=True,
         ),
     )
 
 
-def _malloc_body():
-    c, layout = _AllocatorCompiler("size"), ALLOCATOR_LAYOUT
+def _malloc_body(layout: AllocatorLayout, global_index: int = 0):
+    c = _AllocatorCompiler("size")
     required, cursor, tag = c.local("required"), c.local("cursor"), c.local("tag")
     block_size, remainder = c.local("block_size"), c.local("remainder")
     new_end, current_pages, required_pages = c.local("new_end"), c.local("current_pages"), c.local("required_pages")
@@ -290,7 +316,7 @@ def _malloc_body():
     ins += [g(c.parameter), k(layout.alignment - 1), op("i32.add"), k(layout.size_mask), op("i32.and"),
             k(layout.overhead), op("i32.add"), s(required)]
     ins += [k(layout.heap_start), s(cursor), block, loop]
-    ins += [g(cursor), c.global_get(), op("i32.ge_u"), c.branch(1, conditional=True)]
+    ins += [g(cursor), WasmInstructions.create("global.get", global_index), op("i32.ge_u"), c.branch(1, conditional=True)]
     ins += [g(cursor), c.load(), s(tag), g(tag), k(layout.size_mask), op("i32.and"), s(block_size)]
     ins += [g(tag), k(layout.allocated_flag), op("i32.and"), op("i32.eqz"), iff]
     ins += [g(block_size), g(required), op("i32.ge_u"), iff]
@@ -308,7 +334,14 @@ def _malloc_body():
             g(block_size), k(layout.allocated_flag), op("i32.or"), c.store()]
     ins += [g(cursor), k(layout.header_size), op("i32.add"), ret, end, end]
     ins += [g(cursor), g(block_size), op("i32.add"), s(cursor), c.branch(0), end, end]
-    ins += [c.global_get(), s(cursor), c.global_get(), g(required), op("i32.add"), s(new_end)]
+    ins += [
+        WasmInstructions.create("global.get", global_index),
+        s(cursor),
+        WasmInstructions.create("global.get", global_index),
+        g(required),
+        op("i32.add"),
+        s(new_end),
+    ]
     ins += [g(new_end), g(cursor), op("i32.lt_u"), iff, k(0), ret, end]
     ins += [op("memory.size"), s(current_pages)]
     ins += [g(new_end), k(1), op("i32.sub"), k(layout.page_shift), op("i32.shr_u"),
@@ -318,13 +351,13 @@ def _malloc_body():
             iff, k(0), ret, end, end]
     ins += [g(cursor), g(required), k(layout.allocated_flag), op("i32.or"), c.store()]
     ins += [g(new_end), k(layout.footer_size), op("i32.sub"), g(required), k(layout.allocated_flag), op("i32.or"), c.store()]
-    ins += [g(new_end), c.global_set(), g(cursor), k(layout.header_size), op("i32.add")]
+    ins += [g(new_end), WasmInstructions.create("global.set", global_index), g(cursor), k(layout.header_size), op("i32.add")]
     c.builder.emit(*ins)
     return c.builder.finish()
 
 
-def _free_body():
-    c, layout = _AllocatorCompiler("address"), ALLOCATOR_LAYOUT
+def _free_body(layout: AllocatorLayout, global_index: int = 0):
+    c = _AllocatorCompiler("address")
     block_ref, size, next_ref, previous_size = (c.local(name) for name in ("block", "size", "next", "previous_size"))
     g, s, op, k = c.get, c.set, c.op, c.const
     iff, end, ret = (op(name) for name in ("if", "end", "return"))
@@ -335,7 +368,7 @@ def _free_body():
     ins += [g(size), k(layout.allocated_flag), op("i32.and"), op("i32.eqz"), iff, ret, end]
     ins += [g(size), k(layout.size_mask), op("i32.and"), s(size)]
     ins += [g(block_ref), g(size), op("i32.add"), s(next_ref)]
-    ins += [g(next_ref), c.global_get(), op("i32.lt_u"), iff]
+    ins += [g(next_ref), WasmInstructions.create("global.get", global_index), op("i32.lt_u"), iff]
     ins += [g(next_ref), c.load(), k(layout.allocated_flag), op("i32.and"), op("i32.eqz"), iff]
     ins += [g(size), g(next_ref), c.load(), k(layout.size_mask), op("i32.and"), op("i32.add"), s(size), end, end]
     ins += [g(block_ref), k(layout.heap_start), op("i32.gt_u"), iff]
@@ -344,8 +377,8 @@ def _free_body():
     ins += [g(previous_size), k(layout.size_mask), op("i32.and"), s(previous_size)]
     ins += [g(block_ref), g(previous_size), op("i32.sub"), s(block_ref)]
     ins += [g(size), g(previous_size), op("i32.add"), s(size), end, end]
-    ins += [g(block_ref), g(size), op("i32.add"), c.global_get(), op("i32.eq"), iff]
-    ins += [g(block_ref), c.global_set(), ret, end]
+    ins += [g(block_ref), g(size), op("i32.add"), WasmInstructions.create("global.get", global_index), op("i32.eq"), iff]
+    ins += [g(block_ref), WasmInstructions.create("global.set", global_index), ret, end]
     ins += [g(block_ref), g(size), c.store()]
     ins += [g(block_ref), g(size), op("i32.add"), k(layout.footer_size), op("i32.sub"), g(size), c.store()]
     c.builder.emit(*ins)

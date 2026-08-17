@@ -5,7 +5,9 @@ from typing import ClassVar, Literal
 
 from .encoding import encode_f32, encode_f64, encode_s32, encode_s64, encode_u32
 
-ImmediateKind = Literal["none", "u32", "s32", "s64", "f32", "f64", "block", "memarg", "memidx"]
+ImmediateKind = Literal[
+    "none", "u32", "s32", "s64", "f32", "f64", "block", "memarg", "memidx", "call_indirect"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +32,7 @@ class WasmInstructions:
         "br_if": InstructionSpec(0x0D, "u32"),
         "return": InstructionSpec(0x0F),
         "call": InstructionSpec(0x10, "u32"),
+        "call_indirect": InstructionSpec(0x11, "call_indirect"),
         "drop": InstructionSpec(0x1A),
         "select": InstructionSpec(0x1B),
         # Variables
@@ -116,7 +119,7 @@ class WasmInstructions:
     def create(
         cls,
         wat: str,
-        argument: int | float | None = None,
+        argument: int | float | tuple[int, int] | None = None,
         *,
         alignment: int | None = None,
         offset: int = 0,
@@ -135,7 +138,7 @@ class WasmInstructions:
     @staticmethod
     def _encode_immediate(
         kind: ImmediateKind,
-        argument: int | float | None,
+        argument: int | float | tuple[int, int] | None,
         alignment: int | None,
         offset: int,
         result_type: int | None,
@@ -157,6 +160,11 @@ class WasmInstructions:
         if kind == "memidx":
             index = 0 if argument is None else argument
             return encode_u32(index)
+        if kind == "call_indirect":
+            if not isinstance(argument, tuple) or len(argument) != 2:
+                raise ValueError("call_indirect requires a type index and table index")
+            type_index, table_index = argument
+            return encode_u32(type_index) + encode_u32(table_index)
         if argument is None:
             raise ValueError(f"instruction requires a {kind} immediate")
         encoders = {

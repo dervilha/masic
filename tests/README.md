@@ -20,6 +20,10 @@ Run the probes directly:
 ```console
 python tests/scripts/wasm_examples.py --require-engine
 python tests/scripts/numeric_runtime.py --require-engine
+python tests/scripts/stdlib_runtime.py --require-engine
+python tests/scripts/array_runtime.py --require-engine
+python tests/scripts/interop_runtime.py --require-engine
+python tests/scripts/sections_runtime.py --require-engine
 python tests/scripts/allocator_runtime.py --require-engine
 python tests/scripts/benchmark.py --require-engine
 python tests/scripts/limitations.py --require-engine
